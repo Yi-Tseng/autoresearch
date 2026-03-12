@@ -23,7 +23,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
-fa3 = None  # populated per-worker inside train_func via `global fa3`
+flash_attention_intf = None  # populated per-worker inside train_func via `global flash_attention_intf`
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -90,8 +90,8 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        if fa3 is not None:
-            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if flash_attention_intf is not None:
+            y = flash_attention_intf.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
             # Fallback to PyTorch SDPA (no sliding window; uses full causal attention)
             y = F.scaled_dot_product_attention(
@@ -503,31 +503,20 @@ def train_func(config: dict):
     autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
     cap = torch.cuda.get_device_capability()
 
-    # FA3 init — AFTER device is set, before model
-    global fa3
-    fa3 = None
+    # flash_attention_intf init — AFTER device is set, before model
+    global flash_attention_intf
+    flash_attention_intf = None
     if cap != (9,0) and cap != (8, 0):
         if rank == 0:
-            print(f"Current CUDA family {cap} does not support fa3")
+            print(f"Current CUDA family {cap} does not support flash_attention_intf")
     elif cap == (12,0):
         # blackwell, use fa4
         import flash_attn.cute
-        fa3 = flash_attn.cute
+        flash_attention_intf = flash_attn.cute
     else:
-        try:
-            from kernels import get_kernel
-            repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-            candidate = get_kernel(repo).flash_attn_interface
-            # Smoke-test: verify the kernel actually runs on this GPU
-            _q = torch.zeros(1, 4, 1, 32, dtype=torch.bfloat16, device=device)
-            candidate.flash_attn_func(_q, _q, _q, causal=True, window_size=(-1, 0))
-            fa3 = candidate
-            if rank == 0:
-                print(f"Using FA3 kernel ({repo})")
-        except Exception as e:
-            if rank == 0:
-                print(f"FA3 unavailable ({e}), falling back to torch SDPA")
-
+        from kernels import get_kernel
+        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+        flash_attention_intf = get_kernel(repo).flash_attn_interface
 
     tokenizer = Tokenizer.from_directory()
     vocab_size = tokenizer.get_vocab_size()
