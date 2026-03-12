@@ -528,18 +528,19 @@ def train_func(config: dict):
 
     # flash_attention_intf init — AFTER device is set, before model
     global flash_attention_intf
+    from kernels import get_kernel
     flash_attention_intf = None
-    if cap != (9,0) and cap != (8, 0):
-        if rank == 0:
-            print(f"Current CUDA family {cap} does not support flash_attention_intf")
+    if cap == (9,0):
+        flash_attention_intf = get_kernel("varunneal/flash-attention-3").flash_attn_interface
+    elif cap == (8, 0):
+        flash_attention_intf = get_kernel("kernels-community/flash-attn3").flash_attn_interface
     elif cap == (12,0):
         # blackwell, use fa4
         import flash_attn.cute
         flash_attention_intf = flash_attn.cute
     else:
-        from kernels import get_kernel
-        repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-        flash_attention_intf = get_kernel(repo).flash_attn_interface
+        if rank == 0:
+            print(f"Current CUDA family {cap} does not support flash_attention_intf")
 
     tokenizer = Tokenizer.from_directory()
     vocab_size = tokenizer.get_vocab_size()
