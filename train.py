@@ -495,13 +495,36 @@ def train_func(config: dict):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     torch.set_float32_matmul_precision("high")
-    H100_BF16_PEAK_FLOPS = 989.5e12
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
     autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
     cap = torch.cuda.get_device_capability()
+
+    # Dense BF16 tensor-core peak FLOPS.
+    # Capability alone cannot distinguish within a generation (e.g. all Blackwell
+    # cards report (12,0)), so we first try a name-substring match, then fall
+    # back to the capability table, then default to H100.
+    #
+    # GPU                       cap     BF16 peak TFLOPS (dense, no sparsity)
+    # H100 SXM5                (9,0)    989.5
+    # RTX PRO 6000 Blackwell  (12,0)    419.0
+    # RTX PRO 2000 Blackwell  (12,0)    55.15  (empirically measured)
+    # RTX 2000 Ada             (8,9)     15.9
+    _device_name = torch.cuda.get_device_name(device)
+    _BF16_PEAK_FLOPS_BY_NAME = [
+        ("PRO 6000",  419.0e12),   # RTX PRO 6000 Blackwell
+        ("PRO 2000",  55.15e12),   # RTX PRO 2000 Blackwell — measured empirically (BF16 dense)
+    ]
+    _BF16_PEAK_FLOPS_BY_CAP = {
+        (9,  0): 989.5e12,   # H100 SXM5
+        (8,  9):  15.9e12,   # RTX 2000 Ada Generation
+    }
+    BF16_PEAK_FLOPS = next(
+        (flops for substr, flops in _BF16_PEAK_FLOPS_BY_NAME if substr in _device_name),
+        _BF16_PEAK_FLOPS_BY_CAP.get(cap, 989.5e12),
+    )
 
     # flash_attention_intf init — AFTER device is set, before model
     global flash_attention_intf
@@ -668,7 +691,7 @@ def train_func(config: dict):
             debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
             pct_done = 100 * progress
             tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-            mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+            mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / BF16_PEAK_FLOPS
             remaining = max(0, TIME_BUDGET - total_training_time)
             print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
 
@@ -699,7 +722,7 @@ def train_func(config: dict):
     if rank == 0:
         t_end = time.time()
         steady_state_mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) /
-                            total_training_time / H100_BF16_PEAK_FLOPS) if total_training_time > 0 else 0
+                            total_training_time / BF16_PEAK_FLOPS) if total_training_time > 0 else 0
         peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 
         print("---")
