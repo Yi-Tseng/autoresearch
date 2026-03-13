@@ -530,7 +530,7 @@ def train_func(config: dict):
     global flash_attention_intf
     from kernels import get_kernel
     flash_attention_intf = None
-    if cap == (8, 0):
+    if cap == (8, 0) or cap == (8, 9):
         flash_attention_intf = get_kernel("kernels-community/flash-attn3").flash_attn_interface
     elif cap == (9, 0):
         flash_attention_intf = get_kernel("varunneal/flash-attention-3").flash_attn_interface
